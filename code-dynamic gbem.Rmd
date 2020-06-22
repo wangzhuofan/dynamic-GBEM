@@ -10,6 +10,7 @@ library(MASS)
 library(mvtnorm)
 library(BayesLogit)
 library(reshape2)
+library(zoo)
 ```
 
 
@@ -51,17 +52,21 @@ gp <- function(from,to,g,k,K,start,m){
 
 ```{R}
 #generating mu prior,x1_prior,x2_prior
-mupri <- gp(T[1],T[length(T)],1,0.01,covm,NULL,length(T))
+mupri <- gp(T[1],T[length(T)],1,0.1,covm,NULL,length(T))
 x1 <- matrix(0,nrow = n,ncol = length(T))
 x2 <- matrix(0,nrow = n,ncol = length(T))
 for (i in (1:n)) {
-  x1[i,] <- gp(T[1],T[length(T)],1,0.01,covm,NULL,length(T))
-  x2[i,] <- gp(T[1],T[length(T)],1,0.01,covm,NULL,length(T))
+  x1[i,] <- gp(T[1],T[length(T)],1,0.1,covm,NULL,length(T))
+  x2[i,] <- gp(T[1],T[length(T)],1,0.1,covm,NULL,length(T))
 }
 x <- list("x1"=x1,"x2"=x2)
 
 ```
 
+```{r}
+d <- data.frame("t" <- T,"path"=mupri)
+plot(d,type="l")
+```
 
 ```{r}
 #generating s_{ijt},pi_{ijt},y_{ijt}
@@ -103,11 +108,11 @@ y <- z
 #set parameters
 T <- 1:40
 H <- 10
-kmu <- 0.05
-kx <- 0.05
+kmu <- 0.2
+kx <- 0.2
 a1 <- 2
 a2 <- 2
-iterations <- 5000
+iterations <- 100
 
 ```
 
@@ -140,6 +145,10 @@ for (h in (1:H)) {
 }
 ```
 
+```{r}
+d <- data.frame("t" <- T,"path"=mu)
+plot(d,type="l")
+```
 get the functions
 
 ```{r}
@@ -155,6 +164,7 @@ w_ijt <- function(mu,x,w,y){
         for (h in (1:H)) {
           w[i,j,t] <- w[i,j,t]+x[i,h,t]*x[j,h,t]
         }
+        w[i,j,t] <- rpg(h=1,z=w[i,j,t])
         murs[i,j,t] <- y[i,j,t]-0.5-w[i,j,t]*as.numeric(x[i,,t]%*%x[j,,t])
       }
     }
@@ -174,7 +184,7 @@ mu_t <- function(w,murs,KMU){
   }
   sigmamu <- solve(diag(wdiag)+solve(KMU))
   mumu <- sigmamu%*%mur
-  mu <- rmvnorm(mu=mumu,Sigma = sigmamu)
+  mu <- mvrnorm(mu =mumu,Sigma = sigmamu)
   mu_wdiag <- list("mu"=mu,"wdiag"=wdiag)
   return(mu_wdiag)
 }
@@ -183,26 +193,31 @@ mu_t <- function(w,murs,KMU){
 #step 3
 x_ijt <- function(mu,wdiag,w,x,KX,gamma,y){
   for (v in (1:n)) {
-  
+    yv <- vector()
     x_v <- vector()
     for (i in (1:n)) {
-      yv <- vector()
+      
       if(i!=v){
         r <- vector()
         for (h in (1:H)) {
           temp <- diag(x[i,h,])
           r <- cbind(r,temp)
         }
-        yv <- rbind(yv,y[min(i,v),max(i,v),])
+        yv <- c(yv,y[max(i,v),min(i,v),])
+        x_v <- rbind(x_v,r)
       }
-      x_v <- rbind(x_v,r) 
+       
     }
   
     omega <- diag(rep(wdiag,n-1))
-    sigmav <- solve(t(x_v)%*%omega%*%x_v+kronecker(diag(gamma),solve(KX)))
-    muvr <- yv-kronecker(rep(1,n-1),rep(0.5,length(T)))-omega%*%kronecker(rep(1,n-1),mu)
-    xv <- rmvnorm(mean = sigmav%*%muvr,sigma = sigmav)
-    x[v,,] <- matrix(xv,ncol = n)
+    test <- t(x_v)%*%omega%*%x_v+kronecker(diag(gamma),solve(KX))
+    #while(det(test)<=1e-10){
+     # diag(test) <- diag(test)+0.01
+    #}
+    sigmav <- ginv(test)
+    muvr <- yv-kronecker(rep(1,n-1),rep(0.5,length(T)))-as.vector(omega%*%kronecker(rep(1,n-1),mu))
+    xv <- mvrnorm(mu = as.vector(sigmav%*%t(x_v)%*%muvr),Sigma = sigmav)
+    x[v,,] <- matrix(xv,ncol = length(T))
   }
   return(x)
 }
@@ -210,21 +225,20 @@ x_ijt <- function(mu,wdiag,w,x,KX,gamma,y){
 #function to update shrinkage hyperparameters gamma
 #step 4
 v_h <- function(v,gamma,KX,x){
-  v <- vector(1,length = H)
-  
+  v <- rep(1,H)
   for (l in (1:H)) {
     for (i in (1:n)) {
       v[1] <- v[1]+0.5*(gamma[H]/v[1])*x[i,l,]%*%solve(KX)%*%x[i,l,]
     }
   }
-  v[1] <- rgamma(shape = a1+n*length(T)*H/2,rate = v[1])
+  v[1] <- rgamma(n=1,shape = (a1+n*length(T)*H/2),rate = v[1])
   for (h in (2:H)) {
     for (l in (h:H)) {
       for (i in (1:n)) {
         v[h] <- v[h]+0.5*(gamma[H]/v[h])*x[i,l,]%*%solve(KX)%*%x[i,l,]
       }
     }
-    v[h] <- rgamma(a2+n*length(T)*(H-h+1)/2,rate = v[h])
+    v[h] <- rgamma(n=1,shape=a2+n*length(T)*(H-h+1)/2,rate = v[h])
   }
   gamma <- cumprod(v)
   v_gamma <- list("v"=v,"gamma"=gamma)
@@ -262,4 +276,96 @@ pg_gibbs <- function(T,H,a1,a2,KX,KMU,y,iterations,v_init,gamma_init,w_init,x_in
   post <- list("mu"=mu,"x"=x)
   return(post)
 }
+```
+
+```{r}
+result <- pg_gibbs(T=T,H=H,a1=a1,a2=a2,KX=KX,KMU=KMU,y=y,iterations=iterations,v_init=v,gamma_init=gamma,w_init=w,x_init=x,mu_init=mu)
+mu_est <- result$mu
+x_est <- result$x
+```
+
+```{r}
+plot(mu_est,type = "l")
+lines(mu,lty=3)
+plot(mu-mu_est)
+```
+
+---------financial co-movement data---------
+derive the 23 main national stock market indices quarterly log-returns from 2004 to 2013,about 23*40 data.
+```{r}
+#derive Y from co-movement data z_{i,t}
+v <- 23
+T <- 1:40
+z <- read.csv("C://ISBD/2020暑假/dynamic graph/week2/23-40yahoo finance.csv")
+del <- c(24,25)
+z <- z[-del,]
+rownames(z) <- z[,1]
+delc <- c(1,2)
+z <- z[,-delc]
+Y_f <- array(NA,dim =c(v,v,length(T)))
+for (t in T) {
+  for (i in (2:v)) {
+    for (j in (1:i)) {
+      if(z[i,t]*z[j,t] >0)
+        Y_f[i,j,t] <-1
+      else
+        Y_f[i,j,t] <- 0
+    }
+  }
+}
+```
+
+```{r}
+#set parameters
+T <- 1:40
+H <- 15
+kmu <- 0.1
+kx <- 0.1
+a1 <- 2
+a2 <- 2
+iterations <- 10
+n <- v
+```
+
+all the parameters involved are "shrinkage hyperparameter"gamma,"latent variables"x,"baseline"mu,"augmented data"w.
+
+```{r}
+#get the prior/initial
+KMU <- sapply(T, function(t1){
+    sapply(T, function(t2){
+      covm(1,kmu,t1,t2)
+    })
+  })
+KX <- sapply(T, function(t1){
+    sapply(T, function(t2){
+      covm(1,kx,t1,t2)
+    })
+  })
+#initials
+v <- vector()
+v[1] <- rgamma(1,a1)
+v[2:H] <- rgamma((H-1),a2)
+gamma <- cumprod(v)
+w <- array(rep(0,n*n*length(T)),dim = c(n,n,length(T)))
+x <- array(rep(0,n*H*length(T)),dim = c(n,H,length(T)))
+mu <- gp(T[1],T[length(T)],1,kmu,covm,NULL,length(T))
+
+for (h in (1:H)) {
+  for (i in (1:n)) {
+    x[i,h,] <- gp(T[1],T[length(T)],1,kx,covm,NULL,length(T))
+  }
+}
+```
+
+```{r}
+result_finance <- pg_gibbs(T=T,H=H,a1=a1,a2=a2,KX=KX,KMU=KMU,y=Y_f,iterations=iterations,v_init=v,gamma_init=gamma,w_init=w,x_init=x,mu_init=mu)
+mu_est <- result_finance$mu
+x_est <- result_finance$x
+```
+
+```{r}
+df <- data.frame("time"=as.yearqtr(2004+seq(0,(2013-2004+1)*4-1)/4),"mu"=mu_est)
+plot(df,type = "l")
+#lines(mu,lty=3)
+#plot(mu-mu_est)
 ```
